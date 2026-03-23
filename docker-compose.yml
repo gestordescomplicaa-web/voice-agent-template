@@ -1,0 +1,9 @@
+version: "3.8"
+
+services:
+  agente:
+    build: .
+    container_name: agente_ia
+    restart: always
+    env_file:
+      - .env
