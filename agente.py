@@ -85,15 +85,53 @@ async def buscar_historico(numero: str) -> str:
 
 
 # ───────────────────────────────────────────
-# tools (function calling) — definidas como funções standalone
+# extrair número do cliente
 # ───────────────────────────────────────────
 
-# guarda o número do cliente por sessão
-_numero_cliente: str = "desconhecido"
+def extrair_numero(room_name: str) -> str:
+    for parte in room_name.split("_"):
+        if parte.isdigit() and len(parte) >= 8:
+            return parte
+    return "desconhecido"
 
 
-if env_ok("N8N_WEBHOOK_URL"):
+# ───────────────────────────────────────────
+# agente com tools dentro da classe
+# ───────────────────────────────────────────
 
+class Assistente(Agent):
+    def __init__(self, numero: str, historico: str):
+        self._numero = numero
+
+        prompt_base = env("AGENT_PROMPT", "Você é um atendente virtual simpático e objetivo.")
+        partes = [
+            prompt_base,
+            "Seja breve e natural, como uma conversa por voz.",
+            "Responda sempre em português brasileiro.",
+        ]
+
+        # informa ao LLM quais tools estão disponíveis
+        tools_disponiveis = []
+        if env_ok("N8N_WEBHOOK_URL"):
+            tools_disponiveis.append("enviar_notificacao — envia notificação/recado ao sistema interno")
+        if env_ok("AGENDA_WEBHOOK_URL"):
+            tools_disponiveis.append("gerenciar_agenda — consulta, agenda ou cancela horários")
+        if env_ok("LIGAR_URL"):
+            tools_disponiveis.append("transferir_ligacao — transfere para atendente humano")
+
+        if tools_disponiveis:
+            partes.append("\nVocê tem acesso às seguintes ferramentas: " + ", ".join(tools_disponiveis) + ".")
+            partes.append("Use-as quando fizer sentido para atender o cliente.")
+
+        if historico:
+            partes.append(
+                f"\n--- Histórico recente ---\n{historico}\n"
+                "Use isso apenas como contexto, não repita."
+            )
+
+        super().__init__(instructions="\n".join(partes))
+
+    # ── N8N: enviar notificação/mensagem ──
     @function_tool(
         description=(
             "Envia uma notificação ou mensagem para o sistema interno (N8N). "
@@ -102,6 +140,7 @@ if env_ok("N8N_WEBHOOK_URL"):
         ),
     )
     async def enviar_notificacao(
+        self,
         ctx: RunContext,
         mensagem: str,
         assunto: str = "Solicitação do cliente",
@@ -112,23 +151,21 @@ if env_ok("N8N_WEBHOOK_URL"):
             mensagem: Conteúdo da notificação ou solicitação.
             assunto: Resumo curto do motivo da notificação.
         """
+        url = env("N8N_WEBHOOK_URL")
+        if not url:
+            return "Serviço de notificação não configurado no momento."
         log.info("Tool enviar_notificacao → %s", assunto)
-        resultado = await post_webhook(
-            env("N8N_WEBHOOK_URL"),
-            {
-                "numero": _numero_cliente,
-                "assunto": assunto,
-                "mensagem": mensagem,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            },
-        )
+        resultado = await post_webhook(url, {
+            "numero": self._numero,
+            "assunto": assunto,
+            "mensagem": mensagem,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
         if "erro" in resultado:
             return f"Não consegui enviar a notificação: {resultado['erro']}"
         return "Notificação enviada com sucesso."
 
-
-if env_ok("AGENDA_WEBHOOK_URL"):
-
+    # ── AGENDA: consultar / agendar horário ──
     @function_tool(
         description=(
             "Consulta horários disponíveis ou agenda um compromisso. "
@@ -136,6 +173,7 @@ if env_ok("AGENDA_WEBHOOK_URL"):
         ),
     )
     async def gerenciar_agenda(
+        self,
         ctx: RunContext,
         acao: str,
         data_hora: str = "",
@@ -148,24 +186,22 @@ if env_ok("AGENDA_WEBHOOK_URL"):
             data_hora: Data/hora desejada (formato livre, ex: 'amanhã às 14h').
             observacao: Informação extra sobre o agendamento.
         """
+        url = env("AGENDA_WEBHOOK_URL")
+        if not url:
+            return "Serviço de agenda não configurado no momento."
         log.info("Tool gerenciar_agenda → %s %s", acao, data_hora)
-        resultado = await post_webhook(
-            env("AGENDA_WEBHOOK_URL"),
-            {
-                "numero": _numero_cliente,
-                "acao": acao,
-                "data_hora": data_hora,
-                "observacao": observacao,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            },
-        )
+        resultado = await post_webhook(url, {
+            "numero": self._numero,
+            "acao": acao,
+            "data_hora": data_hora,
+            "observacao": observacao,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
         if "erro" in resultado:
             return f"Erro ao acessar a agenda: {resultado['erro']}"
         return json.dumps(resultado, ensure_ascii=False)
 
-
-if env_ok("LIGAR_URL"):
-
+    # ── LIGAR: transferir / iniciar ligação ──
     @function_tool(
         description=(
             "Transfere a ligação para um atendente humano ou inicia uma chamada. "
@@ -174,6 +210,7 @@ if env_ok("LIGAR_URL"):
         ),
     )
     async def transferir_ligacao(
+        self,
         ctx: RunContext,
         motivo: str,
         destino: str = "",
@@ -184,50 +221,19 @@ if env_ok("LIGAR_URL"):
             motivo: Por que a ligação está sendo transferida.
             destino: Número ou setor de destino (opcional).
         """
+        url = env("LIGAR_URL")
+        if not url:
+            return "Serviço de transferência não configurado no momento."
         log.info("Tool transferir_ligacao → %s", motivo)
-        resultado = await post_webhook(
-            env("LIGAR_URL"),
-            {
-                "numero": _numero_cliente,
-                "motivo": motivo,
-                "destino": destino,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            },
-        )
+        resultado = await post_webhook(url, {
+            "numero": self._numero,
+            "motivo": motivo,
+            "destino": destino,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
         if "erro" in resultado:
             return f"Não foi possível transferir: {resultado['erro']}"
         return "Ligação sendo transferida. Aguarde um momento."
-
-
-# ───────────────────────────────────────────
-# extrair número do cliente
-# ───────────────────────────────────────────
-
-def extrair_numero(room_name: str) -> str:
-    for parte in room_name.split("_"):
-        if parte.isdigit() and len(parte) >= 8:
-            return parte
-    return "desconhecido"
-
-
-# ───────────────────────────────────────────
-# agente
-# ───────────────────────────────────────────
-
-class Assistente(Agent):
-    def __init__(self, historico: str):
-        prompt_base = env("AGENT_PROMPT", "Você é um atendente virtual simpático e objetivo.")
-        partes = [
-            prompt_base,
-            "Seja breve e natural, como uma conversa por voz.",
-            "Responda sempre em português brasileiro.",
-        ]
-        if historico:
-            partes.append(
-                f"\n--- Histórico recente ---\n{historico}\n"
-                "Use isso apenas como contexto, não repita."
-            )
-        super().__init__(instructions="\n".join(partes))
 
 
 # ───────────────────────────────────────────
@@ -235,13 +241,12 @@ class Assistente(Agent):
 # ───────────────────────────────────────────
 
 async def entrypoint(ctx: JobContext):
-    global _numero_cliente
     await ctx.connect()
 
-    _numero_cliente = extrair_numero(ctx.room.name or "")
-    log.info("Sala: %s | Cliente: %s", ctx.room.name, _numero_cliente)
+    numero = extrair_numero(ctx.room.name or "")
+    log.info("Sala: %s | Cliente: %s", ctx.room.name, numero)
 
-    historico = await buscar_historico(_numero_cliente)
+    historico = await buscar_historico(numero)
 
     session = AgentSession(
         vad=silero.VAD.load(),
@@ -250,7 +255,7 @@ async def entrypoint(ctx: JobContext):
         tts=FishTTS(reference_id=env("FISH_REFERENCE_ID")),
     )
 
-    agente = Assistente(historico)
+    agente = Assistente(numero, historico)
     await session.start(room=ctx.room, agent=agente)
 
     saudacao = env("SAUDACAO")
